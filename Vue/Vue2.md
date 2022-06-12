@@ -24,7 +24,7 @@
 - 再访问某一个属性，从而将自己主动添加到该属性的依赖列表中
 
 ```js
-// vm.$watch('a.b.c', function(newVal, oldVal) {})
+// vm.$watch(obj/func, function(newVal, oldVal) {})
 class Watcher {
     constructor(target, expOrFn, cb) {
         this.target = target
@@ -256,3 +256,148 @@ class Observer {
 }
 ```
 
+
+# 4. 变化侦测相关API
+
+## 4.1 $watch
+
+### 4.1.1 基本使用
+- `let unwatch = vm.$watch(object | func, function(newVal, oldVal), options?): func`
+- options包含了deep、immediate
+
+### 4.1.2 内部原理及实现
+
+```js
+// 新增
+let uId = 0
+
+// 管理依赖，收集的依赖均为watcher
+class Dep {
+    constuctor() {
+        this.id = uId++
+        this.subs = []
+    }
+    depend() {
+        // 记录数据变化时，需要通知哪些watcher
+        if (window.target) {
+            window.target.addDep(this)
+        }
+    }
+    removeSub(sub) {
+        const index = this.subs.indexOf(sub)
+        if (index > -1) {
+            return this.subs.splice(index, 1)
+        }
+    }
+}
+
+let seenObjects = new Set()
+function traverse(val) {
+    _traverse(val, seenObjects)
+    seenObject.clear()
+}
+
+function _traverse(val, seen) {
+    const isA = Array.isArray(val)
+    if ((!isA && typeof isA !== 'object') || Object.isFrozen(val)) {
+        return
+    }
+    if (val.__ob__) {
+        // 防止依赖重复
+        const id = val.__ob__.dep.id
+        if (seen.has(id)) {
+            return
+        }
+        seen.add(id)
+    }
+    if (isA) {
+        // 循环数组子项递归
+        i = val.length
+        while(i--) {
+            _traverse(val[i], seen)
+        }
+    } else {
+        // 循环对象所有属性，执行读取操作触发依赖收集逻辑，再递归子值
+        keys = Object.key(val)
+        i = keys.length
+        while(i--) {
+            // val[keys[i]]触发getter
+            _traverse(val[keys[i]], seen)
+        }
+    }
+}
+
+class Watcher {
+    constructor(vm, expOrFn, cb, options) {
+        this.vm = vm
+        this.deps = []
+        this.depIds = new Set()
+        if (options) {
+            this.deep = !!options.deep
+        } else {
+            this.deep = false
+        }
+        if (typeof expOrFn === 'function') {
+            this.getter = expOrFn
+        } else {
+            this.getter = parsePath(expOrFn)
+        }
+        this.cb = cb
+        this.value = this.get()
+    }
+    addDep(dep) {
+        const id = dep.id
+        /*
+            Watcher读取数据时会触发收集依赖的逻辑，若不加以判断
+            每次依赖更新Watcher都会去读取最新的数据，并触发收集依赖的逻辑，造成dep依赖重复
+            因此，若已经订阅过某个dep，则不需要重复订阅，防止依赖重复，修正后仅第一次getter会触发依赖收集
+        */
+        if (!this.depIds.has(id)) {
+            this.depIds.add(id)
+            this.deps.push(dep)
+            dep.addSub(this)
+        }
+    }
+    get() {
+        window.target = this
+        let value = this.getter.call(this.vm, this.vm)
+        // 一定要在window.target被清空前收集依赖
+        if (this.deep) {
+            traverse(value)
+        } 
+        window.target = undefined
+        return value
+    }
+    update() {
+        let oldValue = this.value
+        this.value = this.get()
+        this.cb.call(this.vm, this.value, oldValue)
+    }
+    teardown() {
+        // 将自己从所有依赖项的Dep列表中移除
+        for (let i = 0; i < this.deps.length; i++) {
+            this.deps[i].removeSub(this)
+        }
+    }
+}
+
+/**
+ * 
+ * @param {*} expOrFn 观察的数据，string | func
+ * @param {*} cb function(newVal, oldVal)
+ * @param {*} options 配置项(deep / immediate)
+ * @returns 取消观察数据的函数
+ */
+Vue.prototype.$watch = function(expOrFn, cb, options) {
+    const vm = this
+    options = options || {}
+    const watcher = new Watcher(vm, expOrFn, cb, options)
+    if (options.immediate) {
+        this.cb.call(vm, watcher.value)
+    }
+    return function unwatchFn() {
+        // 将watcher实例从正被观察的状态的依赖中移除
+        watcher.teardown()
+    }
+}
+```
